@@ -33,6 +33,25 @@ async function run() {
     res.send("SalonBook Server is Running!");
   });
 
+  // ==========================================
+  // SERVICE API
+  // ==========================================
+
+  // ADD SERVICE
+  app.post("/services", async (req, res) => {
+    const newService = {
+      ...req.body,
+      createdAt: new Date(),
+    };
+
+    const result = await servicesCollection.insertOne(newService);
+    res.status(201).json({
+      success: true,
+      message: "Service added successfully!",
+      data: result,
+    });
+  });
+
   app.listen(port, () => {
     console.log(`🚀 Server is running on port ${port}`);
   });
