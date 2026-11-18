@@ -37,6 +37,38 @@ async function run() {
   // SERVICE API
   // ==========================================
 
+  // ALL DATA GET
+
+  app.get("/services", async (req, res) => {
+    try {
+      const services = await servicesCollection.find({}).toArray();
+      res.status(200).json({
+        success: true,
+        data: services,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // GET SERVICE 6 ACTIVE DATA
+
+  app.get("/services/featured", async (req, res) => {
+    try {
+      const activeServices = await servicesCollection
+        .find({ status: "Active" })
+        .limit(6)
+        .toArray();
+
+      res.status(200).json({
+        success: true,
+        data: activeServices,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
   // ADD SERVICE
   app.post("/services", async (req, res) => {
     const newService = {
