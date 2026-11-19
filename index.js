@@ -28,6 +28,7 @@ async function run() {
 
   const db = client.db("salonbook_db");
   const servicesCollection = db.collection("services");
+  const appointmentsCollection = db.collection("appointments");
 
   app.get("/", (req, res) => {
     res.send("SalonBook Server is Running!");
@@ -204,6 +205,274 @@ async function run() {
       res.status(200).json({
         success: true,
         message: "Service deleted successfully!",
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // ==========================================
+  // APPOINTMENTS API
+  // ==========================================
+
+  // POST APPOINTMENTS
+  app.post("/appointments", async (req, res) => {
+    try {
+      const {
+        serviceId,
+        serviceName,
+        category,
+        price,
+        duration,
+        appointmentDate,
+        timeSlot,
+        message,
+        image,
+        customerEmail,
+        customerName,
+      } = req.body;
+
+      if (!serviceId || !appointmentDate || !timeSlot) {
+        return res.status(400).json({
+          success: false,
+          message: "Service, appointment date, and time slot are required.",
+        });
+      }
+
+      if (!ObjectId.isValid(serviceId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid service ID.",
+        });
+      }
+
+      const service = await servicesCollection.findOne({
+        _id: new ObjectId(serviceId),
+      });
+
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found.",
+        });
+      }
+
+      if (service.status !== "Active") {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Only active services are available for appointment booking.",
+        });
+      }
+
+      const newAppointment = {
+        serviceId: new ObjectId(serviceId),
+        serviceName: serviceName || service.name,
+        price: Number(price ?? service.price),
+        duration: Number(duration ?? service.duration),
+        appointmentDate,
+        timeSlot,
+        category: service.category,
+        image: service.image,
+        message: message?.trim() || "",
+        customerName: customerName || "Guest Customer",
+        customerEmail: customerEmail || "",
+        status: "Pending", // Default: "Pending" | Allowed: "Pending" | "Confirmed" | "Cancelled"
+        paymentStatus: "Unpaid", // Default: "Unpaid" | Allowed: "Unpaid" | "Paid"
+        createdAt: new Date(),
+      };
+
+      const result = await appointmentsCollection.insertOne(newAppointment);
+
+      res.status(201).json({
+        success: true,
+        message: "Appointment booked successfully!",
+        data: { _id: result.insertedId, ...newAppointment },
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // লগইন করা কাস্টমারের নিজের অ্যাপয়েন্টমেন্টগুলো আনা
+  app.get("/appointments", async (req, res) => {
+    try {
+      const email = req.query.email?.trim().toLowerCase();
+
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          message: "Customer email is required to view appointments.",
+        });
+      }
+
+      const appointments = await appointmentsCollection
+        .find({ customerEmail: email })
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.status(200).json({
+        success: true,
+        data: appointments,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // GET DATA BY CUSTOMER EMAIL
+  app.get("/appointments/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const email = req.query.email?.trim().toLowerCase();
+
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid appointment ID." });
+      }
+
+      const appointment = await appointmentsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!appointment) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Appointment not found." });
+      }
+
+      if (email && appointment.customerEmail?.toLowerCase() !== email) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only view your own appointments.",
+        });
+      }
+
+      res.status(200).json({ success: true, data: appointment });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.patch("/appointments/:id/cancel", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const customerEmail = req.body?.customerEmail?.trim().toLowerCase();
+
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid appointment ID." });
+      }
+
+      const appointment = await appointmentsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!appointment) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Appointment not found." });
+      }
+
+      if (
+        customerEmail &&
+        appointment.customerEmail?.toLowerCase() !== customerEmail
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized action on another customer's appointment.",
+        });
+      }
+
+      if (appointment.status !== "Pending") {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot cancel an appointment that is already ${appointment.status}.`,
+        });
+      }
+
+      const updated = await appointmentsCollection.findOneAndUpdate(
+        { _id: new ObjectId(id), status: "Pending" },
+        { $set: { status: "Cancelled", updatedAt: new Date() } },
+        { returnDocument: "after" },
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Appointment cancelled successfully.",
+        data: updated,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.patch("/appointments/:id/pay", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const customerEmail = req.body?.customerEmail?.trim().toLowerCase();
+
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid appointment ID." });
+      }
+
+      const appointment = await appointmentsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!appointment) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Appointment not found." });
+      }
+
+      if (
+        customerEmail &&
+        appointment.customerEmail?.toLowerCase() !== customerEmail
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Unauthorized payment attempt.",
+        });
+      }
+
+      if (appointment.status !== "Confirmed") {
+        return res.status(400).json({
+          success: false,
+          message: "Payment is only allowed for Confirmed appointments.",
+        });
+      }
+
+      if (appointment.paymentStatus === "Paid") {
+        return res.status(400).json({
+          success: false,
+          message: "This appointment is already paid.",
+        });
+      }
+
+      const updated = await appointmentsCollection.findOneAndUpdate(
+        {
+          _id: new ObjectId(id),
+          status: "Confirmed",
+          paymentStatus: "Unpaid",
+        },
+        {
+          $set: {
+            paymentStatus: "Paid",
+            paidAt: new Date(),
+          },
+        },
+        { returnDocument: "after" },
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Payment completed successfully!",
+        data: updated,
       });
     } catch (error) {
       res.status(500).json({ success: false, message: error.message });
