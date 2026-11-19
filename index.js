@@ -1,7 +1,7 @@
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
-import { MongoClient, ServerApiVersion } from "mongodb";
+import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
 
 dotenv.config();
 
@@ -69,6 +69,32 @@ async function run() {
     }
   });
 
+  // GET SINGLE SERVICE DATA
+
+  app.get("/services/:id", async (req, res) => {
+    try {
+      const id = req.params.id;
+      if (!ObjectId.isValid(id)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid ID format" });
+      }
+
+      const service = await servicesCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      if (!service) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Service not found" });
+      }
+
+      res.status(200).json({ success: true, data: service });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
   // ADD SERVICE
   app.post("/services", async (req, res) => {
     const newService = {
@@ -82,6 +108,106 @@ async function run() {
       message: "Service added successfully!",
       data: result,
     });
+  });
+
+  // UPDATE SERVICE DATA
+  app.patch("/services/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid service ID format.",
+        });
+      }
+
+      const { name, category, description, price, duration, image, status } =
+        req.body;
+      const numericPrice = Number(price);
+      const numericDuration = Number(duration);
+
+      if (Number.isNaN(numericPrice) || numericPrice <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Price must be a positive number.",
+        });
+      }
+
+      if (Number.isNaN(numericDuration) || numericDuration <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Duration must be a positive number.",
+        });
+      }
+
+      const updateDoc = {
+        $set: {
+          name: name.trim(),
+          category: category.trim(),
+          description: description?.trim() || "",
+          price: numericPrice,
+          duration: numericDuration,
+          ...(image ? { image } : {}),
+          status: status === "Inactive" ? "Inactive" : "Active",
+          updatedAt: new Date(),
+        },
+      };
+
+      const result = await servicesCollection.findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        updateDoc,
+        { returnDocument: "after" },
+      );
+
+      if (!result) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Service updated successfully!",
+        data: result,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // DELETE SERVICE
+
+  app.delete("/services/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid service ID format.",
+        });
+      }
+
+      const result = await servicesCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Service deleted successfully!",
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
   });
 
   app.listen(port, () => {
