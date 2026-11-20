@@ -29,10 +29,43 @@ async function run() {
   const db = client.db("salonbook_db");
   const servicesCollection = db.collection("services");
   const appointmentsCollection = db.collection("appointments");
+  const usersCollection = db.collection("user");
 
   app.get("/", (req, res) => {
     res.send("SalonBook Server is Running!");
   });
+
+  //Blocked user middleware
+  const verifyNotBlocked = async (req, res, next) => {
+    try {
+      const email = (
+        req.user?.email ||
+        req.headers["x-user-email"] ||
+        req.body?.customerEmail ||
+        req.body?.actorEmail ||
+        req.query?.email ||
+        ""
+      )
+        .toString()
+        .trim()
+        .toLowerCase();
+
+      if (!email) return next();
+
+      const user = await usersCollection.findOne({ email });
+      if (user && user.blocked) {
+        return res.status(403).json({
+          success: false,
+          blocked: true,
+          message: "Your account has been blocked by the administrator.",
+        });
+      }
+
+      next();
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  };
 
   // ==========================================
   // SERVICE API
@@ -72,7 +105,7 @@ async function run() {
 
   // GET SINGLE SERVICE DATA
 
-  app.get("/services/:id", async (req, res) => {
+  app.get("/services/:id", verifyNotBlocked, async (req, res) => {
     try {
       const id = req.params.id;
       if (!ObjectId.isValid(id)) {
@@ -216,7 +249,7 @@ async function run() {
   // ==========================================
 
   // POST APPOINTMENTS
-  app.post("/appointments", async (req, res) => {
+  app.post("/appointments", verifyNotBlocked, async (req, res) => {
     try {
       const {
         serviceId,
@@ -294,20 +327,14 @@ async function run() {
     }
   });
 
-  // লগইন করা কাস্টমারের নিজের অ্যাপয়েন্টমেন্টগুলো আনা
-  app.get("/appointments", async (req, res) => {
+  // get appointments data for admin and customer
+  app.get("/appointments", verifyNotBlocked, async (req, res) => {
     try {
       const email = req.query.email?.trim().toLowerCase();
-
-      if (!email) {
-        return res.status(400).json({
-          success: false,
-          message: "Customer email is required to view appointments.",
-        });
-      }
+      const filter = email ? { customerEmail: email } : {};
 
       const appointments = await appointmentsCollection
-        .find({ customerEmail: email })
+        .find(filter)
         .sort({ createdAt: -1 })
         .toArray();
 
@@ -321,7 +348,7 @@ async function run() {
   });
 
   // GET DATA BY CUSTOMER EMAIL
-  app.get("/appointments/:id", async (req, res) => {
+  app.get("/appointments/:id", verifyNotBlocked, async (req, res) => {
     try {
       const { id } = req.params;
       const email = req.query.email?.trim().toLowerCase();
@@ -355,7 +382,7 @@ async function run() {
     }
   });
 
-  app.patch("/appointments/:id/cancel", async (req, res) => {
+  app.patch("/appointments/:id/cancel", verifyNotBlocked, async (req, res) => {
     try {
       const { id } = req.params;
       const customerEmail = req.body?.customerEmail?.trim().toLowerCase();
@@ -409,7 +436,7 @@ async function run() {
     }
   });
 
-  app.patch("/appointments/:id/pay", async (req, res) => {
+  app.patch("/appointments/:id/pay", verifyNotBlocked, async (req, res) => {
     try {
       const { id } = req.params;
       const customerEmail = req.body?.customerEmail?.trim().toLowerCase();
@@ -472,6 +499,350 @@ async function run() {
       res.status(200).json({
         success: true,
         message: "Payment completed successfully!",
+        data: updated,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // APPOINTMENT API FOR ADMIN
+
+  // admin can Pending appointment Confirm
+  app.patch("/appointments/:id/confirm", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment ID.",
+        });
+      }
+
+      const appointment = await appointmentsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!appointment) {
+        return res.status(404).json({
+          success: false,
+          message: "Appointment not found.",
+        });
+      }
+
+      if (appointment.status !== "Pending") {
+        return res.status(400).json({
+          success: false,
+          message: `Only pending appointments can be confirmed. Current status: ${appointment.status}.`,
+        });
+      }
+
+      const updated = await appointmentsCollection.findOneAndUpdate(
+        { _id: new ObjectId(id), status: "Pending" },
+        { $set: { status: "Confirmed", confirmedAt: new Date() } },
+        { returnDocument: "after" },
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Appointment confirmed successfully!",
+        data: updated,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // Admin Pending or Confirmed appointments Cancel
+  app.patch("/appointments/:id/admin-cancel", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment ID.",
+        });
+      }
+
+      const appointment = await appointmentsCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!appointment) {
+        return res.status(404).json({
+          success: false,
+          message: "Appointment not found.",
+        });
+      }
+
+      if (appointment.status === "Cancelled") {
+        return res.status(400).json({
+          success: false,
+          message: "This appointment is already cancelled.",
+        });
+      }
+
+      if (
+        appointment.status !== "Pending" &&
+        appointment.status !== "Confirmed"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Only pending or confirmed appointments can be cancelled.",
+        });
+      }
+
+      const updated = await appointmentsCollection.findOneAndUpdate(
+        {
+          _id: new ObjectId(id),
+          status: { $in: ["Pending", "Confirmed"] },
+        },
+        { $set: { status: "Cancelled", cancelledAt: new Date() } },
+        { returnDocument: "after" },
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Appointment cancelled successfully.",
+        data: updated,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // ==========================================
+  // USER MANAGE API
+  // ==========================================
+
+  app.get("/profile", async (req, res) => {
+    try {
+      const email = (
+        req.user?.email ||
+        req.headers["x-user-email"] ||
+        req.query.email ||
+        ""
+      )
+        .toString()
+        .trim()
+        .toLowerCase();
+
+      if (!email) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized. Please sign in to view your profile.",
+        });
+      }
+
+      const user = await usersCollection.findOne(
+        { email },
+        { projection: { password: 0 } },
+      );
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User profile not found.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          _id: user._id,
+          name: user.name || "",
+          email: user.email,
+          image: user.image || "",
+          phone: user.phone || "",
+          role: user.role || "customer",
+          blocked: Boolean(user.blocked),
+        },
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.patch("/profile", async (req, res) => {
+    try {
+      const actorEmail = (
+        req.user?.email ||
+        req.headers["x-user-email"] ||
+        req.body?.actorEmail ||
+        ""
+      )
+        .toString()
+        .trim()
+        .toLowerCase();
+
+      const targetEmail = (req.body?.targetEmail || actorEmail || "")
+        .toString()
+        .trim()
+        .toLowerCase();
+
+      if (!actorEmail) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized. Please sign in first.",
+        });
+      }
+
+      if (targetEmail && targetEmail !== actorEmail) {
+        return res.status(403).json({
+          success: false,
+          message: "Forbidden. You can only update your own profile.",
+        });
+      }
+
+      if (
+        "role" in req.body ||
+        "blocked" in req.body ||
+        "isBlocked" in req.body
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "You cannot modify your role or blocked status.",
+        });
+      }
+
+      const { name, image, phone } = req.body;
+
+      if (!name || !name.toString().trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Name is required.",
+        });
+      }
+
+      const cleanPhone = phone ? phone.toString().trim() : "";
+      const cleanImage = image ? image.toString().trim() : "";
+
+      const existingUser = await usersCollection.findOne({ email: actorEmail });
+      if (!existingUser) {
+        return res.status(404).json({
+          success: false,
+          message: "User account not found.",
+        });
+      }
+
+      if (existingUser.blocked) {
+        return res.status(403).json({
+          success: false,
+          message: "Your account is currently blocked.",
+        });
+      }
+
+      const updatedDoc = await usersCollection.findOneAndUpdate(
+        { email: actorEmail },
+        {
+          $set: {
+            name: name.toString().trim(),
+            image: cleanImage,
+            phone: cleanPhone,
+            updatedAt: new Date(),
+          },
+        },
+        {
+          returnDocument: "after",
+          projection: { password: 0 },
+        },
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Profile updated successfully!",
+        data: {
+          _id: updatedDoc._id,
+          name: updatedDoc.name || "",
+          email: updatedDoc.email,
+          image: updatedDoc.image || "",
+          phone: updatedDoc.phone || "",
+          role: updatedDoc.role || "customer",
+          blocked: Boolean(updatedDoc.blocked),
+        },
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.get("/users", async (req, res) => {
+    try {
+      const customers = await usersCollection
+        .find(
+          { role: { $nin: ["admin", "Admin"] } },
+          { projection: { password: 0 } },
+        )
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.status(200).json({
+        success: true,
+        data: customers,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.patch("/users/:id/block-status", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { blocked } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid user ID.",
+        });
+      }
+
+      if (typeof blocked !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: "Blocked status must be true or false.",
+        });
+      }
+
+      const targetUser = await usersCollection.findOne({
+        _id: new ObjectId(id),
+      });
+
+      if (!targetUser) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found.",
+        });
+      }
+
+      if (targetUser.role === "admin" || targetUser.role === "Admin") {
+        return res.status(403).json({
+          success: false,
+          message: "Admin accounts cannot be blocked.",
+        });
+      }
+
+      const updated = await usersCollection.findOneAndUpdate(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            blocked,
+            updatedAt: new Date(),
+          },
+        },
+        {
+          returnDocument: "after",
+          projection: { password: 0 },
+        },
+      );
+
+      res.status(200).json({
+        success: true,
+        message: blocked
+          ? `${updated.name || updated.email} has been blocked.`
+          : `${updated.name || updated.email} has been unblocked.`,
         data: updated,
       });
     } catch (error) {
