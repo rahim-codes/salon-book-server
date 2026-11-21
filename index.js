@@ -2,11 +2,14 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
+import Stripe from "stripe";
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 5000;
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // Middleware
 app.use(cors());
@@ -30,6 +33,7 @@ async function run() {
   const servicesCollection = db.collection("services");
   const appointmentsCollection = db.collection("appointments");
   const usersCollection = db.collection("user");
+  const transactionsCollection = db.collection("transactions");
 
   app.get("/", (req, res) => {
     res.send("SalonBook Server is Running!");
@@ -844,6 +848,214 @@ async function run() {
           ? `${updated.name || updated.email} has been blocked.`
           : `${updated.name || updated.email} has been unblocked.`,
         data: updated,
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // ==========================================
+  // TRANSACTIONS API
+  // ==========================================
+
+  async function finalizeVerifiedPayment(session) {
+    if (!session || session.payment_status !== "paid") return null;
+
+    const appointmentId = session.metadata?.appointmentId;
+    if (!appointmentId || !ObjectId.isValid(appointmentId)) return null;
+
+    const transactionId =
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.id;
+
+    const appointment = await appointmentsCollection.findOne({
+      _id: new ObjectId(appointmentId),
+    });
+    if (!appointment) return null;
+
+    // ১. অ্যাপয়েন্টমেন্ট Paid আপডেট
+    await appointmentsCollection.updateOne(
+      { _id: new ObjectId(appointmentId) },
+      {
+        $set: {
+          paymentStatus: "Paid",
+          paidAt: new Date(),
+          transactionId,
+        },
+      },
+    );
+
+    // ২. Atomic Upsert: একই stripeSessionId থাকলে নতুন করে ইনসার্ট হবে না
+    const txDoc = {
+      appointmentId: new ObjectId(appointmentId),
+      transactionId,
+      stripeSessionId: session.id,
+      customerName:
+        session.metadata?.customerName ||
+        appointment.customerName ||
+        "Customer",
+      customerEmail:
+        session.metadata?.customerEmail ||
+        appointment.customerEmail ||
+        session.customer_email ||
+        "",
+      serviceName: appointment.serviceName,
+      amount: session.amount_total
+        ? Number(session.amount_total / 100)
+        : Number(appointment.price),
+      currency: (session.currency || "bdt").toUpperCase(),
+      paymentMethod: "Stripe",
+      paymentStatus: "Paid",
+      createdAt: new Date(),
+    };
+
+    await transactionsCollection.updateOne(
+      { stripeSessionId: session.id },
+      { $setOnInsert: txDoc },
+      { upsert: true },
+    );
+
+    return await transactionsCollection.findOne({
+      stripeSessionId: session.id,
+    });
+  }
+
+  // Stripe Webhook (express.json() এর আগে রাখবেন)
+  app.post(
+    "/webhook/stripe",
+    express.raw({ type: "application/json" }),
+    async (req, res) => {
+      if (!process.env.STRIPE_WEBHOOK_SECRET) {
+        return res.status(200).json({ received: true, skipped: true });
+      }
+
+      try {
+        const signature = req.headers["stripe-signature"];
+        const event = stripe.webhooks.constructEvent(
+          req.body,
+          signature,
+          process.env.STRIPE_WEBHOOK_SECRET,
+        );
+
+        if (event.type === "checkout.session.completed") {
+          await finalizeVerifiedPayment(event.data.object);
+        }
+
+        return res.status(200).json({ received: true });
+      } catch (err) {
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+      }
+    },
+  );
+
+  // Checkout Session তৈরি করা (শুধু Confirmed ও Unpaid অ্যাপয়েন্টমেন্টের জন্য)
+  app.post("/payments/create-checkout-session", async (req, res) => {
+    try {
+      const { appointmentId, customerEmail } = req.body;
+
+      if (!appointmentId || !ObjectId.isValid(appointmentId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid appointment ID." });
+      }
+
+      const appointment = await appointmentsCollection.findOne({
+        _id: new ObjectId(appointmentId),
+      });
+
+      if (!appointment) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Appointment not found." });
+      }
+
+      if (
+        customerEmail &&
+        appointment.customerEmail &&
+        appointment.customerEmail.toLowerCase() !==
+          customerEmail.trim().toLowerCase()
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only pay for your own appointment.",
+        });
+      }
+
+      if (appointment.status !== "Confirmed") {
+        return res.status(400).json({
+          success: false,
+          message: "Only confirmed appointments can be paid.",
+        });
+      }
+
+      if (appointment.paymentStatus === "Paid") {
+        return res
+          .status(400)
+          .json({ success: false, message: "Already paid." });
+      }
+
+      const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        customer_email: appointment.customerEmail || customerEmail,
+        line_items: [
+          {
+            price_data: {
+              currency: "bdt",
+              product_data: {
+                name: appointment.serviceName,
+                description: `${appointment.appointmentDate} (${appointment.timeSlot})`,
+              },
+              unit_amount: Math.round(Number(appointment.price) * 100),
+            },
+            quantity: 1,
+          },
+        ],
+        metadata: {
+          appointmentId: appointment._id.toString(),
+          customerName: appointment.customerName || "Customer",
+          customerEmail: appointment.customerEmail || customerEmail || "",
+        },
+        success_url: `${clientUrl}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${clientUrl}/payment/cancel?appointment_id=${appointment._id.toString()}`,
+      });
+
+      res.status(200).json({ success: true, url: session.url });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  // Payment Success পেজ থেকে Stripe সেশন ভেরিফাই করা
+  app.get("/payments/verify-session", async (req, res) => {
+    try {
+      const sessionId = req.query.session_id?.toString().trim();
+      if (!sessionId) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Session ID missing." });
+      }
+
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      if (session.payment_status !== "paid") {
+        return res
+          .status(400)
+          .json({ success: false, message: "Payment is not completed." });
+      }
+
+      const tx = await finalizeVerifiedPayment(session);
+      if (!tx) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Appointment not found." });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Payment verified successfully!",
+        data: tx,
       });
     } catch (error) {
       res.status(500).json({ success: false, message: error.message });
