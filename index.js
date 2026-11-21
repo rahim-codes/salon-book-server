@@ -874,7 +874,6 @@ async function run() {
     });
     if (!appointment) return null;
 
-    // ১. অ্যাপয়েন্টমেন্ট Paid আপডেট
     await appointmentsCollection.updateOne(
       { _id: new ObjectId(appointmentId) },
       {
@@ -886,7 +885,6 @@ async function run() {
       },
     );
 
-    // ২. Atomic Upsert: একই stripeSessionId থাকলে নতুন করে ইনসার্ট হবে না
     const txDoc = {
       appointmentId: new ObjectId(appointmentId),
       transactionId,
@@ -921,7 +919,6 @@ async function run() {
     });
   }
 
-  // Stripe Webhook (express.json() এর আগে রাখবেন)
   app.post(
     "/webhook/stripe",
     express.raw({ type: "application/json" }),
@@ -949,7 +946,6 @@ async function run() {
     },
   );
 
-  // Checkout Session তৈরি করা (শুধু Confirmed ও Unpaid অ্যাপয়েন্টমেন্টের জন্য)
   app.post("/payments/create-checkout-session", async (req, res) => {
     try {
       const { appointmentId, customerEmail } = req.body;
@@ -1028,7 +1024,6 @@ async function run() {
     }
   });
 
-  // Payment Success পেজ থেকে Stripe সেশন ভেরিফাই করা
   app.get("/payments/verify-session", async (req, res) => {
     try {
       const sessionId = req.query.session_id?.toString().trim();
