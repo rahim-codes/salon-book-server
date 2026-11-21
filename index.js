@@ -919,6 +919,25 @@ async function run() {
     });
   }
 
+  app.get("/transactions", async (req, res) => {
+    try {
+      const transactions = await transactionsCollection
+        .find({})
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.status(200).json({
+        success: true,
+        data: transactions,
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to load transactions.",
+      });
+    }
+  });
+
   app.post(
     "/webhook/stripe",
     express.raw({ type: "application/json" }),
